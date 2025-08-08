@@ -32,6 +32,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+123云盘开放平台/
 
 
 # Jupyter Notebook

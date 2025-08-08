@@ -78,11 +78,11 @@ pip3 install -r requirements.txt
 
 Make sure you have **docker** and **docker-compose** installed
 ```sh
-docker pull tangyoha/telegram_media_downloader:latest
+docker pull supresong/telegram_media_downloader:latest
 mkdir -p ~/app && mkdir -p ~/app/log/ && cd ~/app
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/master/docker-compose.yaml -O docker-compose.yaml
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/master/config.yaml -O config.yaml
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/master/data.yaml -O data.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/docker-compose.yaml -O docker-compose.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/config.yaml -O config.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/data.yaml -O data.yaml
 # vi config.yaml and docker-compose.yaml
 vi config.yaml
 
@@ -94,7 +94,7 @@ docker-compose run --rm telegram_media_downloader
 docker-compose up -d
 
 # Upgrade
-docker pull tangyoha/telegram_media_downloader:latest
+docker pull supresong/telegram_media_downloader:latest
 cd ~/app
 docker-compose down
 docker-compose up -d
@@ -179,6 +179,9 @@ upload_drive:
   upload_adapter: rclone
   # option,when config upload_adapter rclone then this config are required
   rclone_path: D:\rclone\rclone.exe
+  # option,when config upload_adapter pan123 then this config are required
+  client_id: your_123pan_client_id
+  client_secret: your_123pan_client_secret
   # option
   before_upload_file_zip: True
   # option
@@ -217,8 +220,10 @@ enable_download_txt: false
 - **upload_drive** - You can upload file to cloud drive.
   - `enable_upload_file` - Enable upload file, default `false`.
   - `remote_dir` - Where you upload, like `drive_id/drive_name`.
-  - `upload_adapter` - Upload file adapter, which can be `rclone`, `aligo`. If it is `rclone`, it supports all `rclone` servers that support uploading. If it is `aligo`, it supports uploading `Ali cloud disk`.
+  - `upload_adapter` - Upload file adapter, which can be `rclone`, `aligo`, `pan123`. If it is `rclone`, it supports all `rclone` servers that support uploading. If it is `aligo`, it supports uploading `Ali cloud disk`. If it is `pan123`, it supports uploading to `123云盘`.
   - `rclone_path` - RClone exe path, see [How to use rclone](https://github.com/tangyoha/telegram_media_downloader/wiki/Rclone)
+  - `client_id` - 123云盘开放平台应用的Client ID，当`upload_adapter`为`pan123`时必填
+  - `client_secret` - 123云盘开放平台应用的Client Secret，当`upload_adapter`为`pan123`时必填
   - `before_upload_file_zip` - Zip file before upload, default `false`.
   - `after_upload_file_delete` - Delete file after upload success, default `false`.
 - **file_name_prefix** - Custom file name, use the same as **file_path_prefix**
@@ -264,7 +269,58 @@ proxy:
   password: your_password(delete the line if none)
 ```
 
-If your proxy doesn’t require authorization you can omit username and password. Then the proxy will automatically be enabled.
+If your proxy doesn't require authorization you can omit username and password. Then the proxy will automatically be enabled.
+
+## 123云盘配置说明 (123pan Cloud Drive Configuration)
+
+### 申请123云盘开发者账号
+
+1. 访问 [123云盘开放平台](https://www.123pan.com/developer)
+2. 注册并登录开发者账号
+3. 创建应用，获取 `Client ID` 和 `Client Secret`
+
+### 配置示例
+
+```yaml
+upload_drive:
+  enable_upload_file: true
+  upload_adapter: pan123
+  remote_dir: "/telegram"
+  client_id: "your_123pan_client_id"
+  client_secret: "your_123pan_client_secret"
+  before_upload_file_zip: false
+  after_upload_file_delete: true
+```
+
+### 功能特性
+
+- ✅ **秒传检测** - 基于MD5校验，相同文件无需重复上传
+- ✅ **分片上传** - 支持大文件(≥1GB)自动分片上传
+- ✅ **单步上传** - 小文件(<1GB)直接上传，速度更快
+- ✅ **进度监控** - 实时显示上传进度
+- ✅ **自动重试** - 网络异常时自动重试上传
+- ✅ **路径映射** - 自动创建远程目录结构
+- ✅ **文件压缩** - 支持上传前压缩文件
+- ✅ **自动清理** - 上传成功后可选择删除本地文件
+
+### 配置参数说明
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `enable_upload_file` | boolean | 是 | 启用文件上传功能 |
+| `upload_adapter` | string | 是 | 设置为 "pan123" |
+| `remote_dir` | string | 是 | 云盘根目录，如 "/telegram" |
+| `client_id` | string | 是 | 123云盘应用的Client ID |
+| `client_secret` | string | 是 | 123云盘应用的Client Secret |
+| `before_upload_file_zip` | boolean | 否 | 上传前是否压缩文件 |
+| `after_upload_file_delete` | boolean | 否 | 上传成功后是否删除本地文件 |
+
+### 注意事项
+
+1. **API限制** - 123云盘API有频率限制，请勿频繁调用
+2. **文件大小** - 单文件最大支持10GB（开发者权限）
+3. **存储空间** - 请确保123云盘有足够的存储空间
+4. **网络环境** - 建议在稳定的网络环境下使用
 
 ## Contributing
 

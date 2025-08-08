@@ -482,6 +482,13 @@ class Application:
                 self.cloud_drive_config.upload_adapter = upload_drive_config[
                     "upload_adapter"
                 ]
+                
+            # 123云盘配置解析
+            if upload_drive_config.get("client_id"):
+                self.cloud_drive_config.pan123_client_id = upload_drive_config["client_id"]
+                
+            if upload_drive_config.get("client_secret"):
+                self.cloud_drive_config.pan123_client_secret = upload_drive_config["client_secret"]
 
         self.file_name_prefix_split = _config.get(
             "file_name_prefix_split", self.file_name_prefix_split
@@ -686,6 +693,14 @@ class Application:
                 CloudDrive.aligo_upload_file(
                     self.cloud_drive_config, self.save_path, local_file_path
                 ),
+            )
+        elif self.cloud_drive_config.upload_adapter == "pan123":
+            ret = await CloudDrive.pan123_upload_file(
+                self.cloud_drive_config,
+                self.save_path,
+                local_file_path,
+                progress_callback,
+                progress_args,
             )
 
         return ret

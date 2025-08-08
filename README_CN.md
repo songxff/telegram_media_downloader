@@ -80,11 +80,11 @@ pip3 install -r requirements.txt
 
 确保安装了 **docker** 和 **docker-compose**
 ```sh
-docker pull tangyoha/telegram_media_downloader:latest
+docker pull supresong/telegram_media_downloader:latest
 mkdir -p ~/app && mkdir -p ~/app/log/ && cd ~/app
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/blob/master/docker-compose.yaml -O docker-compose.yaml
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/blob/master/config.yaml -O config.yaml
-wget https://raw.githubusercontent.com/tangyoha/telegram_media_downloader/blob/master/data.yaml -O data.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/docker-compose.yaml -O docker-compose.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/config.yaml -O config.yaml
+wget https://raw.githubusercontent.com/supresong/telegram_media_downloader/master/data.yaml -O data.yaml
 # vi config.yaml and docker-compose.yaml
 vi config.yaml
 
@@ -96,7 +96,7 @@ docker-compose run --rm telegram_media_downloader
 docker-compose up -d
 
 ＃ 升级
-docker pull tangyoha/telegram_media_downloader:latest
+docker pull supresong/telegram_media_downloader:latest
 cd ~/app
 docker-compose down
 docker-compose up -d
