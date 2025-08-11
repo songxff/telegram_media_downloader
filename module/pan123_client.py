@@ -37,6 +37,7 @@ class Pan123Client:
         self.access_token: Optional[str] = None
         self.token_expires_at: Optional[datetime] = None
         self.session: Optional[httpx.AsyncClient] = None
+        self._auth_lock = asyncio.Lock()  # 用于令牌刷新的并发控制
         
     async def __aenter__(self):
         """异步上下文管理器入口"""
@@ -134,8 +135,17 @@ class Pan123Client:
         """检查token是否过期"""
         if not self.token_expires_at:
             return True
+        
+        # 获取当前时间并处理时区问题
+        now = datetime.now()
+        expires_at = self.token_expires_at
+        
+        # 如果过期时间有时区信息，将其转换为本地时间（不带时区）
+        if expires_at.tzinfo is not None:
+            expires_at = expires_at.replace(tzinfo=None)
+        
         # 提前5分钟刷新token
-        return datetime.now() >= (self.token_expires_at - timedelta(minutes=5))
+        return now >= (expires_at - timedelta(minutes=5))
         
     async def authenticate(self) -> str:
         """
@@ -147,40 +157,47 @@ class Pan123Client:
         Raises:
             Pan123AuthError: 认证失败
         """
+        # 快速检查，如果令牌有效直接返回
         if self.access_token and not self._is_token_expired():
             return self.access_token
             
-        logger.info("正在获取123云盘访问令牌...")
-        
-        payload = {
-            "clientID": self.client_id,
-            "clientSecret": self.client_secret
-        }
-        
-        try:
-            data = await self._request("POST", "/api/v1/access_token", json=payload)
-            
-            self.access_token = data.get("accessToken")
-            if not self.access_token:
-                raise Pan123AuthError("未能获取访问令牌")
+        # 使用锁确保同一时间只有一个请求进行认证
+        async with self._auth_lock:
+            # 再次检查，可能在等待锁期间已经被其他请求刷新了
+            if self.access_token and not self._is_token_expired():
+                return self.access_token
                 
-            # 解析过期时间
-            expired_at_str = data.get("expiredAt")
-            if expired_at_str:
-                try:
-                    self.token_expires_at = datetime.fromisoformat(expired_at_str.replace('Z', '+00:00'))
-                except ValueError:
-                    # 如果解析失败，默认设置30天后过期
+            logger.info("正在获取123云盘访问令牌...")
+            
+            payload = {
+                "clientID": self.client_id,
+                "clientSecret": self.client_secret
+            }
+            
+            try:
+                data = await self._request("POST", "/api/v1/access_token", json=payload)
+                
+                self.access_token = data.get("accessToken")
+                if not self.access_token:
+                    raise Pan123AuthError("未能获取访问令牌")
+                    
+                # 解析过期时间
+                expired_at_str = data.get("expiredAt")
+                if expired_at_str:
+                    try:
+                        self.token_expires_at = datetime.fromisoformat(expired_at_str.replace('Z', '+00:00'))
+                    except ValueError:
+                        # 如果解析失败，默认设置30天后过期
+                        self.token_expires_at = datetime.now() + timedelta(days=30)
+                else:
                     self.token_expires_at = datetime.now() + timedelta(days=30)
-            else:
-                self.token_expires_at = datetime.now() + timedelta(days=30)
+                    
+                logger.info(f"123云盘令牌获取成功，过期时间: {self.token_expires_at}")
+                return self.access_token
                 
-            logger.info(f"123云盘令牌获取成功，过期时间: {self.token_expires_at}")
-            return self.access_token
-            
-        except Exception as e:
-            logger.error(f"123云盘认证失败: {e}")
-            raise Pan123AuthError(f"认证失败: {e}")
+            except Exception as e:
+                logger.error(f"123云盘认证失败: {e}")
+                raise Pan123AuthError(f"认证失败: {e}")
             
     async def get_upload_domains(self) -> List[str]:
         """
@@ -194,36 +211,94 @@ class Pan123Client:
         """
         await self.authenticate()
         data = await self._request("GET", "/upload/v2/file/domain")
-        return data.get("servers", [])
+        # API返回的是数组，而不是在servers字段中
+        if isinstance(data, list):
+            return data
+        return data.get("servers", data)
+        
+    async def get_file_list(self, parent_id: int = 0, limit: int = 100) -> List[Dict]:
+        """
+        获取文件列表
+        
+        Args:
+            parent_id: 父目录ID，0为根目录
+            limit: 返回文件数量限制
+            
+        Returns:
+            文件列表
+            
+        Raises:
+            Pan123APIError: 获取文件列表失败
+        """
+        await self.authenticate()
+        
+        params = {
+            "parentFileId": parent_id,
+            "limit": limit
+        }
+        
+        data = await self._request("GET", "/api/v2/file/list", params=params)
+        return data.get("fileList", [])
         
     async def create_folder(self, parent_id: int, name: str) -> int:
         """
-        创建文件夹
+        创建文件夹，如果已存在则返回现有的文件夹ID
         
         Args:
             parent_id: 父目录ID
             name: 文件夹名称
             
         Returns:
-            新创建的文件夹ID
+            文件夹ID（新创建的或已存在的）
             
         Raises:
             Pan123APIError: 创建文件夹失败
         """
         await self.authenticate()
         
+        # 首先尝试获取现有文件夹
+        try:
+            files = await self.get_file_list(parent_id)
+            for file_info in files:
+                if (file_info.get("type") == 1 and  # 1表示文件夹
+                    file_info.get("filename") == name and
+                    file_info.get("trashed") == 0):  # 未在回收站
+                    existing_id = file_info.get("fileId")
+                    logger.debug(f"文件夹已存在: {name} (ID: {existing_id})")
+                    return existing_id
+        except Exception as e:
+            logger.warning(f"获取文件列表失败，尝试直接创建: {e}")
+        
+        # 文件夹不存在，创建新文件夹
         payload = {
             "name": name,
             "parentID": parent_id
         }
         
-        data = await self._request("POST", "/upload/v1/file/mkdir", json=payload)
-        folder_id = data.get("dirID")
-        if not folder_id:
-            raise Pan123APIError(f"创建文件夹失败: {name}")
+        try:
+            data = await self._request("POST", "/upload/v1/file/mkdir", json=payload)
+            folder_id = data.get("dirID")
+            if not folder_id:
+                raise Pan123APIError(f"创建文件夹失败: {name}")
+                
+            logger.debug(f"创建文件夹成功: {name} (ID: {folder_id})")
+            return folder_id
             
-        logger.debug(f"创建文件夹成功: {name} (ID: {folder_id})")
-        return folder_id
+        except Pan123APIError as e:
+            # 如果是文件夹已存在的错误，再次尝试获取
+            if "已经有同名文件夹" in str(e):
+                try:
+                    files = await self.get_file_list(parent_id)
+                    for file_info in files:
+                        if (file_info.get("type") == 1 and  # 1表示文件夹
+                            file_info.get("filename") == name and
+                            file_info.get("trashed") == 0):  # 未在回收站
+                            existing_id = file_info.get("fileId")
+                            logger.debug(f"创建失败但找到已存在文件夹: {name} (ID: {existing_id})")
+                            return existing_id
+                except Exception:
+                    pass
+            raise e
         
     async def create_file(
         self, 
