@@ -58,7 +58,7 @@ class Pan123Client:
                     write=300.0,   # 写入超时
                     pool=30.0      # 连接池超时
                 ),
-                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
             )
             
     async def _close_session(self):
@@ -163,14 +163,20 @@ class Pan123Client:
         Raises:
             Pan123AuthError: 认证失败
         """
+        logger.debug(f"[Auth] 开始认证检查")
+        
         # 快速检查，如果令牌有效直接返回
         if self.access_token and not self._is_token_expired():
+            logger.debug(f"[Auth] 使用现有有效令牌")
             return self.access_token
             
+        logger.debug(f"[Auth] 需要获取新令牌，等待认证锁...")
+        
         # 使用锁确保同一时间只有一个请求进行认证
         async with self._auth_lock:
             # 再次检查，可能在等待锁期间已经被其他请求刷新了
             if self.access_token and not self._is_token_expired():
+                logger.debug(f"[Auth] 其他请求已刷新令牌，使用现有令牌")
                 return self.access_token
                 
             logger.info("正在获取123云盘访问令牌...")
@@ -215,12 +221,19 @@ class Pan123Client:
         Raises:
             Pan123APIError: 获取上传域名失败
         """
+        logger.debug(f"[UploadDomains] 开始获取上传域名")
         await self.authenticate()
         data = await self._request("GET", "/upload/v2/file/domain")
+        logger.debug(f"[UploadDomains] API响应: {data}")
+        
         # API返回的是数组，而不是在servers字段中
         if isinstance(data, list):
+            logger.debug(f"[UploadDomains] 返回域名列表: {data}")
             return data
-        return data.get("servers", data)
+        
+        domains = data.get("servers", data)
+        logger.debug(f"[UploadDomains] 解析后的域名列表: {domains}")
+        return domains
         
     async def get_file_list(self, parent_id: int = 0, limit: int = 100) -> List[Dict]:
         """
@@ -379,17 +392,19 @@ class Pan123Client:
         
         url = f"{upload_domain}/upload/v2/file/single/create"
         
-        # 准备表单数据
+        # 准备表单数据 - multipart/form-data中所有字段都应该是字符串
         data = {
-            "parentFileID": parent_id,  # 改为数字类型，不转字符串
+            "parentFileID": str(parent_id),
             "filename": filename,
             "etag": etag,
-            "size": size,  # 改为数字类型，不转字符串
-            "duplicate": duplicate,  # 改为数字类型，不转字符串
+            "size": str(size),
+            "duplicate": str(duplicate),
             "containDir": "false"
         }
         
         logger.debug(f"单步上传参数: parent_id={parent_id}, filename={filename}, size={size}")
+        logger.debug(f"单步上传URL: {url}")
+        logger.debug(f"单步上传数据: {data}")
         
         # 准备文件数据 - 对于大文件使用文件句柄，小文件读取到内存
         file_handle = None
@@ -407,9 +422,15 @@ class Pan123Client:
             if "Content-Type" in headers:
                 del headers["Content-Type"]
                 
-            response_data = await self._request(
-                "POST", url, headers=headers, data=data, files=files
-            )
+            logger.debug(f"单步上传请求头: {headers}")
+            try:
+                response_data = await self._request(
+                    "POST", url, headers=headers, data=data, files=files
+                )
+                logger.debug(f"单步上传响应: {response_data}")
+            except Exception as e:
+                logger.error(f"单步上传请求异常: {e}")
+                raise
         finally:
             # 确保文件句柄被关闭
             if file_handle:
@@ -449,7 +470,7 @@ class Pan123Client:
         # 准备表单数据
         data = {
             "preuploadID": preupload_id,
-            "sliceNo": slice_no,  # 改为数字类型，不转字符串
+            "sliceNo": str(slice_no),  # multipart/form-data中应该是字符串
             "sliceMD5": slice_md5
         }
         
@@ -569,37 +590,52 @@ class Pan123PathManager:
         Raises:
             Pan123APIError: 创建目录失败
         """
+        logger.debug(f"[PathManager] 确保路径存在: {remote_path}")
         normalized_path = self._normalize_path(remote_path)
+        logger.debug(f"[PathManager] 标准化路径: {normalized_path}")
         
         # 检查缓存
         if normalized_path in self.path_cache:
-            return self.path_cache[normalized_path]
+            cached_id = self.path_cache[normalized_path]
+            logger.debug(f"[PathManager] 路径已缓存: {normalized_path} -> ID: {cached_id}")
+            return cached_id
             
         # 分割路径
         path_parts = self._split_path(normalized_path)
         if not path_parts:
+            logger.debug(f"[PathManager] 根目录路径，返回ID: 0")
             return 0  # 根目录
             
+        logger.debug(f"[PathManager] 路径分割结果: {path_parts}")
+        
         # 递归创建路径
         current_path = ""
         parent_id = 0
         
-        for part in path_parts:
+        for i, part in enumerate(path_parts):
             current_path = f"{current_path}/{part}" if current_path else f"/{part}"
+            logger.debug(f"[PathManager] 处理路径部分 {i+1}/{len(path_parts)}: {part} -> 当前路径: {current_path}")
             
             # 检查当前路径是否已缓存
             if current_path in self.path_cache:
                 parent_id = self.path_cache[current_path]
+                logger.debug(f"[PathManager] 路径部分已缓存: {current_path} -> ID: {parent_id}")
                 continue
                 
             # 创建目录
-            logger.info(f"创建目录: {current_path} (父目录ID: {parent_id})")
-            folder_id = await self.client.create_folder(parent_id, part)
+            logger.info(f"[PathManager] 创建目录: {current_path} (父目录ID: {parent_id}, 目录名: {part})")
+            try:
+                folder_id = await self.client.create_folder(parent_id, part)
+                logger.info(f"[PathManager] 目录创建成功: {current_path} -> ID: {folder_id}")
+                
+                # 缓存结果
+                self.path_cache[current_path] = folder_id
+                parent_id = folder_id
+            except Exception as e:
+                logger.error(f"[PathManager] 创建目录失败: {current_path}, 错误: {e}")
+                raise
             
-            # 缓存结果
-            self.path_cache[current_path] = folder_id
-            parent_id = folder_id
-            
+        logger.info(f"[PathManager] 最终路径ID: {normalized_path} -> {parent_id}")
         return parent_id
         
     def clear_cache(self):

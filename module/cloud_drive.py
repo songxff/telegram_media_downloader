@@ -322,32 +322,52 @@ class CloudDrive:
             file_name = os.path.basename(file_path)
             file_md5 = calculate_md5(file_path)
             
-            logger.info(f"准备上传文件到123云盘: {file_name} (大小: {file_size} bytes)")
+            logger.info(f"[Upload] 准备上传文件到123云盘: {file_name}")
+            logger.info(f"[Upload] 文件信息 - 大小: {file_size} bytes, MD5: {file_md5}")
+            logger.info(f"[Upload] 目标路径: {remote_path}")
             
             async with drive_config.pan123_client:
+                logger.debug(f"[Upload] 已进入123云盘客户端上下文")
+                
                 # 确保远程目录存在
+                logger.debug(f"[Upload] 开始确保远程目录存在: {remote_path}")
                 parent_id = await drive_config.pan123_path_manager.ensure_path_exists(remote_path)
+                logger.info(f"[Upload] 目标目录ID: {parent_id} (类型: {type(parent_id)})")
                 
-                # 创建文件（检测秒传）
-                create_result = await drive_config.pan123_client.create_file(
-                    parent_id=parent_id,
-                    filename=file_name,
-                    etag=file_md5,
-                    size=file_size
-                )
+                # 验证parent_id的有效性
+                if parent_id is None:
+                    logger.error(f"[Upload] 目录ID为None，无法上传文件")
+                    return False
+                if not isinstance(parent_id, int):
+                    logger.error(f"[Upload] 目录ID类型错误: {type(parent_id)}, 值: {parent_id}")
+                    return False
                 
-                # 6. 处理秒传
-                if create_result.get("reuse"):
-                    logger.info(f"123云盘秒传成功: {file_name}")
-                    upload_status = True
-                else:
-                    # 7. 选择上传策略
-                    if file_size < 1024 * 1024 * 1024:  # <1GB 单步上传
-                        upload_status = await CloudDrive._upload_single_file_internal(
-                            drive_config.pan123_client, file_path, parent_id, file_name, 
-                            file_md5, file_size, progress_callback, progress_args
-                        )
-                    else:  # ≥1GB 分片上传
+                # 6. 根据文件大小选择上传策略
+                if file_size < 1024 * 1024 * 1024:  # <1GB 单步上传
+                    logger.info(f"[Upload] 选择单步上传策略 (文件大小: {file_size/1024/1024:.1f}MB < 1GB)")
+                    # 单步上传：直接上传，不需要先创建文件
+                    upload_status = await CloudDrive._upload_single_file_internal(
+                        drive_config.pan123_client, file_path, parent_id, file_name, 
+                        file_md5, file_size, progress_callback, progress_args
+                    )
+                else:  # ≥1GB 分片上传
+                    logger.info(f"[Upload] 选择分片上传策略 (文件大小: {file_size/1024/1024:.1f}MB >= 1GB)")
+                    # 分片上传：先创建文件（检测秒传）
+                    logger.debug(f"[Upload] 开始创建文件记录（检测秒传）")
+                    create_result = await drive_config.pan123_client.create_file(
+                        parent_id=parent_id,
+                        filename=file_name,
+                        etag=file_md5,
+                        size=file_size
+                    )
+                    
+                    # 处理秒传
+                    if create_result.get("reuse"):
+                        logger.info(f"[Upload] 123云盘秒传成功: {file_name}")
+                        upload_status = True
+                    else:
+                        logger.info(f"[Upload] 文件不支持秒传，开始分片上传")
+                        # 执行分片上传
                         upload_status = await CloudDrive._upload_multipart_file_internal(
                             drive_config.pan123_client, file_path, create_result, file_name,
                             progress_callback, progress_args
@@ -355,19 +375,31 @@ class CloudDrive:
                         
             # 8. 上传后处理
             if upload_status:
+                logger.info(f"[Upload] 上传成功: {file_name}")
                 drive_config.total_upload_success_file_count += 1
+                
                 if drive_config.after_upload_file_delete:
-                    os.remove(local_file_path)
-                    logger.info(f"删除本地文件: {local_file_path}")
+                    try:
+                        os.remove(local_file_path)
+                        logger.info(f"[Upload] 删除本地文件: {local_file_path}")
+                    except Exception as e:
+                        logger.error(f"[Upload] 删除本地文件失败: {local_file_path}, 错误: {e}")
+                        
                 if zip_file_path and drive_config.before_upload_file_zip:
-                    os.remove(zip_file_path)
-                    logger.info(f"删除压缩文件: {zip_file_path}")
-                logger.info(f"123云盘上传成功: {local_file_path}")
+                    try:
+                        os.remove(zip_file_path)
+                        logger.info(f"[Upload] 删除压缩文件: {zip_file_path}")
+                    except Exception as e:
+                        logger.error(f"[Upload] 删除压缩文件失败: {zip_file_path}, 错误: {e}")
+                        
+                logger.info(f"[Upload] ✓ 123云盘上传完成: {file_name}")
             else:
-                logger.error(f"123云盘上传失败: {local_file_path}")
+                logger.error(f"[Upload] ✗ 123云盘上传失败: {file_name}")
                 
         except Exception as e:
-            logger.error(f"123云盘上传异常: {e}")
+            import traceback
+            logger.error(f"[Upload] 123云盘上传发生未捕获异常: {e}")
+            logger.error(f"[Upload] 异常堆栈:\n{traceback.format_exc()}")
             upload_status = False
             
         return upload_status
@@ -385,24 +417,32 @@ class CloudDrive:
     ) -> bool:
         """单步上传文件（内部方法，假设已在上下文中）"""
         import asyncio
+        
+        logger.info(f"[SingleUpload] 开始单步上传: {file_name}")
+        logger.debug(f"[SingleUpload] 上传参数 - parent_id: {parent_id}, size: {file_size}, md5: {file_md5}")
+        
         max_retries = 3
         retry_delay = 2  # 重试间隔（秒）
         
         for attempt in range(max_retries):
             try:
+                logger.debug(f"[SingleUpload] 尝试 {attempt + 1}/{max_retries}: {file_name}")
+                
                 # 获取上传域名
+                logger.debug(f"[SingleUpload] 获取上传域名...")
                 upload_domains = await client.get_upload_domains()
                 if not upload_domains:
-                    logger.error("无法获取上传域名")
+                    logger.error(f"[SingleUpload] 无法获取上传域名")
                     return False
                     
                 upload_domain = upload_domains[0]  # 选择第一个域名
                 if attempt == 0:  # 只在第一次尝试时记录
-                    logger.info(f"使用上传域名: {upload_domain}")
+                    logger.info(f"[SingleUpload] 使用上传域名: {upload_domain}")
                 else:
-                    logger.info(f"第 {attempt + 1} 次重试上传: {file_name}")
+                    logger.info(f"[SingleUpload] 第 {attempt + 1} 次重试上传: {file_name}")
                 
                 # 执行单步上传
+                logger.debug(f"[SingleUpload] 调用upload_single API...")
                 result = await client.upload_single(
                     upload_domain=upload_domain,
                     file_path=file_path,
@@ -412,14 +452,23 @@ class CloudDrive:
                     size=file_size
                 )
                 
-                # 上传成功
-                success = result.get("fileID") is not None
-                if success:
+                logger.debug(f"[SingleUpload] API响应: {result}")
+                
+                # 检查上传结果
+                file_id = result.get("fileID")
+                completed = result.get("completed", False)
+                
+                if file_id and completed:
+                    # 成功（可能是秒传或正常上传）
                     if attempt > 0:
-                        logger.info(f"重试上传成功: {file_name}")
+                        logger.info(f"[SingleUpload] 重试上传成功: {file_name}")
+                    elif file_id != 0:  # fileID不为0通常表示秒传
+                        logger.info(f"[SingleUpload] 上传成功（可能为秒传）: {file_name}, fileID: {file_id}")
+                    else:
+                        logger.info(f"[SingleUpload] 上传成功: {file_name}, fileID: {file_id}")
                     return True
                 else:
-                    logger.warning(f"上传返回无效结果: {result}")
+                    logger.warning(f"[SingleUpload] 上传返回无效结果: {result}")
                     
             except Exception as e:
                 error_msg = str(e)
@@ -427,13 +476,14 @@ class CloudDrive:
                                      ['readerror', 'timeout', 'connection', 'network', 'broken pipe'])
                 
                 if is_network_error and attempt < max_retries - 1:
-                    logger.warning(f"网络错误，{retry_delay}秒后重试 ({attempt + 1}/{max_retries}): {e}")
+                    logger.warning(f"[SingleUpload] 网络错误，{retry_delay}秒后重试 ({attempt + 1}/{max_retries}): {e}")
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # 指数退避
                     continue
                 else:
-                    logger.error(f"单步上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                    logger.error(f"[SingleUpload] 上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                     
+        logger.error(f"[SingleUpload] 所有重试均失败: {file_name}")
         return False
             
     @staticmethod
@@ -448,6 +498,9 @@ class CloudDrive:
         """分片上传文件（内部方法，假设已在上下文中）"""
         from module.pan123_client import calculate_slice_md5
         import asyncio
+        
+        logger.info(f"[MultipartUpload] 开始分片上传: {file_name}")
+        logger.debug(f"[MultipartUpload] create_result: {create_result}")
         
         try:
             preupload_id = create_result["preuploadID"]
