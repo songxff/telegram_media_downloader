@@ -381,11 +381,11 @@ class Pan123Client:
         
         # 准备表单数据
         data = {
-            "parentFileID": str(parent_id),
+            "parentFileID": parent_id,  # 改为数字类型，不转字符串
             "filename": filename,
             "etag": etag,
-            "size": str(size),
-            "duplicate": str(duplicate),
+            "size": size,  # 改为数字类型，不转字符串
+            "duplicate": duplicate,  # 改为数字类型，不转字符串
             "containDir": "false"
         }
         
@@ -449,7 +449,7 @@ class Pan123Client:
         # 准备表单数据
         data = {
             "preuploadID": preupload_id,
-            "sliceNo": str(slice_no),
+            "sliceNo": slice_no,  # 改为数字类型，不转字符串
             "sliceMD5": slice_md5
         }
         
