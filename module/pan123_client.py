@@ -52,7 +52,12 @@ class Pan123Client:
         """初始化HTTP会话"""
         if not self.session:
             self.session = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0),
+                timeout=httpx.Timeout(
+                    connect=30.0,  # 连接超时
+                    read=300.0,    # 读取超时（5分钟，适用于大文件上传）
+                    write=300.0,   # 写入超时
+                    pool=30.0      # 连接池超时
+                ),
                 limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
             )
             
@@ -128,8 +133,9 @@ class Pan123Client:
             logger.error(f"HTTP错误: {e.response.status_code} - {e.response.text}")
             raise Pan123APIError(f"HTTP错误: {e.response.status_code}")
         except httpx.RequestError as e:
-            logger.error(f"请求错误: {e}")
-            raise Pan123APIError(f"网络请求失败: {e}")
+            error_msg = f"网络请求失败: {type(e).__name__}: {str(e)}"
+            logger.error(error_msg)
+            raise Pan123APIError(error_msg)
             
     def _is_token_expired(self) -> bool:
         """检查token是否过期"""
@@ -382,6 +388,8 @@ class Pan123Client:
             "duplicate": str(duplicate),
             "containDir": "false"
         }
+        
+        logger.debug(f"单步上传参数: parent_id={parent_id}, filename={filename}, size={size}")
         
         # 准备文件数据 - 对于大文件使用文件句柄，小文件读取到内存
         file_handle = None
