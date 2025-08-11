@@ -384,31 +384,57 @@ class CloudDrive:
         progress_args: tuple = ()
     ) -> bool:
         """单步上传文件（内部方法，假设已在上下文中）"""
-        try:
-            # 获取上传域名
-            upload_domains = await client.get_upload_domains()
-            if not upload_domains:
-                logger.error("无法获取上传域名")
-                return False
+        import asyncio
+        max_retries = 3
+        retry_delay = 2  # 重试间隔（秒）
+        
+        for attempt in range(max_retries):
+            try:
+                # 获取上传域名
+                upload_domains = await client.get_upload_domains()
+                if not upload_domains:
+                    logger.error("无法获取上传域名")
+                    return False
+                    
+                upload_domain = upload_domains[0]  # 选择第一个域名
+                if attempt == 0:  # 只在第一次尝试时记录
+                    logger.info(f"使用上传域名: {upload_domain}")
+                else:
+                    logger.info(f"第 {attempt + 1} 次重试上传: {file_name}")
                 
-            upload_domain = upload_domains[0]  # 选择第一个域名
-            logger.info(f"使用上传域名: {upload_domain}")
-            
-            # 执行单步上传
-            result = await client.upload_single(
-                upload_domain=upload_domain,
-                file_path=file_path,
-                parent_id=parent_id,
-                filename=file_name,
-                etag=file_md5,
-                size=file_size
-            )
-            
-            return result.get("fileID") is not None
-            
-        except Exception as e:
-            logger.error(f"单步上传失败: {e}")
-            return False
+                # 执行单步上传
+                result = await client.upload_single(
+                    upload_domain=upload_domain,
+                    file_path=file_path,
+                    parent_id=parent_id,
+                    filename=file_name,
+                    etag=file_md5,
+                    size=file_size
+                )
+                
+                # 上传成功
+                success = result.get("fileID") is not None
+                if success:
+                    if attempt > 0:
+                        logger.info(f"重试上传成功: {file_name}")
+                    return True
+                else:
+                    logger.warning(f"上传返回无效结果: {result}")
+                    
+            except Exception as e:
+                error_msg = str(e)
+                is_network_error = any(keyword in error_msg.lower() for keyword in 
+                                     ['readerror', 'timeout', 'connection', 'network', 'broken pipe'])
+                
+                if is_network_error and attempt < max_retries - 1:
+                    logger.warning(f"网络错误，{retry_delay}秒后重试 ({attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                    continue
+                else:
+                    logger.error(f"单步上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                    
+        return False
             
     @staticmethod
     async def _upload_multipart_file_internal(
@@ -421,6 +447,7 @@ class CloudDrive:
     ) -> bool:
         """分片上传文件（内部方法，假设已在上下文中）"""
         from module.pan123_client import calculate_slice_md5
+        import asyncio
         
         try:
             preupload_id = create_result["preuploadID"]
@@ -448,17 +475,44 @@ class CloudDrive:
                     # 计算分片MD5
                     slice_md5 = calculate_slice_md5(slice_data)
                     
-                    # 上传分片
-                    success = await client.upload_slice(
-                        upload_domain=upload_domain,
-                        preupload_id=preupload_id,
-                        slice_no=slice_no,
-                        slice_data=slice_data,
-                        slice_md5=slice_md5
-                    )
+                    # 带重试的分片上传
+                    max_retries = 3
+                    retry_delay = 2
+                    slice_success = False
                     
-                    if not success:
-                        logger.error(f"分片 {slice_no} 上传失败")
+                    for attempt in range(max_retries):
+                        try:
+                            success = await client.upload_slice(
+                                upload_domain=upload_domain,
+                                preupload_id=preupload_id,
+                                slice_no=slice_no,
+                                slice_data=slice_data,
+                                slice_md5=slice_md5
+                            )
+                            
+                            if success:
+                                slice_success = True
+                                if attempt > 0:
+                                    logger.info(f"分片 {slice_no} 重试上传成功")
+                                break
+                            else:
+                                logger.warning(f"分片 {slice_no} 上传返回失败")
+                                
+                        except Exception as e:
+                            error_msg = str(e)
+                            is_network_error = any(keyword in error_msg.lower() for keyword in 
+                                                 ['readerror', 'timeout', 'connection', 'network', 'broken pipe'])
+                            
+                            if is_network_error and attempt < max_retries - 1:
+                                logger.warning(f"分片 {slice_no} 网络错误，{retry_delay}秒后重试 ({attempt + 1}/{max_retries}): {e}")
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2  # 指数退避
+                                continue
+                            else:
+                                logger.error(f"分片 {slice_no} 上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                    
+                    if not slice_success:
+                        logger.error(f"分片 {slice_no} 所有重试均失败")
                         return False
                         
                     # 更新进度
